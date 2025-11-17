@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from firebase_service import FirebaseService
+from firebase_service import SupabaseService
 from network_analyzer import NetworkAnalyzer
 import os
 from dotenv import load_dotenv
@@ -10,12 +10,11 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-APP_ID = os.getenv('APP_ID', 'default_app')
 USER_ID = os.getenv('USER_ID', 'default_user')
 
-firebase_service = FirebaseService(APP_ID, USER_ID)
+supabase_service = SupabaseService(USER_ID)
 
-initial_config = firebase_service.load_baseline_config()
+initial_config = supabase_service.load_baseline_config()
 print(f"Loaded initial configuration: {initial_config}")
 
 network_analyzer = NetworkAnalyzer(initial_config)
@@ -23,7 +22,7 @@ network_analyzer = NetworkAnalyzer(initial_config)
 
 def alert_callback(alert_data):
     print(f"Anomaly detected: {alert_data}")
-    firebase_service.save_anomaly_alert(alert_data)
+    supabase_service.save_anomaly_alert(alert_data)
 
 
 network_analyzer.start_sniffing(alert_callback)
@@ -46,7 +45,7 @@ def get_metrics():
 
 @app.route('/api/config', methods=['GET'])
 def get_config():
-    config = firebase_service.load_baseline_config()
+    config = supabase_service.load_baseline_config()
     return jsonify(config)
 
 
@@ -58,12 +57,12 @@ def update_config():
         if not new_config:
             return jsonify({'error': 'No configuration data provided'}), 400
 
-        required_fields = ['trafficThreshold', 'connectionRate', 'protocolBlacklist']
+        required_fields = ['traffic_threshold', 'connection_rate', 'protocol_blacklist']
         for field in required_fields:
             if field not in new_config:
                 return jsonify({'error': f'Missing required field: {field}'}), 400
 
-        success = firebase_service.save_baseline_config(new_config)
+        success = supabase_service.save_baseline_config(new_config)
 
         if success:
             network_analyzer.update_config(new_config)
@@ -82,7 +81,7 @@ def update_config():
 def get_alerts():
     try:
         limit = request.args.get('limit', default=50, type=int)
-        alerts = firebase_service.get_recent_alerts(limit)
+        alerts = supabase_service.get_recent_alerts(limit)
         return jsonify(alerts)
     except Exception as e:
         return jsonify({'error': str(e)}), 500

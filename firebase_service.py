@@ -1,76 +1,61 @@
-import firebase_admin
-from firebase_admin import credentials, firestore
-from datetime import datetime
+from supabase import create_client
 import os
-import json
 
 
-class FirebaseService:
-    def __init__(self, app_id, user_id):
-        self.app_id = app_id
+class SupabaseService:
+    def __init__(self, user_id):
         self.user_id = user_id
+        self.supabase_url = os.getenv('SUPABASE_URL')
+        self.supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 
-        if not firebase_admin._apps:
-            service_account_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH', 'service-account.json')
+        if not self.supabase_url or not self.supabase_key:
+            raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
 
-            if os.path.exists(service_account_path):
-                cred = credentials.Certificate(service_account_path)
-            else:
-                service_account_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON')
-                if service_account_json:
-                    cred = credentials.Certificate(json.loads(service_account_json))
-                else:
-                    cred = credentials.Certificate({
-                        "type": "service_account",
-                        "project_id": "YOUR_PROJECT_ID",
-                        "private_key_id": "YOUR_PRIVATE_KEY_ID",
-                        "private_key": "YOUR_PRIVATE_KEY",
-                        "client_email": "YOUR_CLIENT_EMAIL",
-                        "client_id": "YOUR_CLIENT_ID",
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                        "client_x509_cert_url": "YOUR_CERT_URL"
-                    })
-
-            firebase_admin.initialize_app(cred)
-
-        self.db = firestore.client()
-        self.config_path = f'artifacts/{self.app_id}/users/{self.user_id}/config'
-        self.alerts_path = f'artifacts/{self.app_id}/users/{self.user_id}/alerts'
+        self.client = create_client(self.supabase_url, self.supabase_key)
 
     def load_baseline_config(self):
         try:
-            doc_ref = self.db.collection(self.config_path).document('baseline')
-            doc = doc_ref.get()
+            response = self.client.table('network_configs').select('*').eq('user_id', self.user_id).execute()
 
-            if doc.exists:
-                config_data = doc.to_dict()
+            if response.data and len(response.data) > 0:
+                config = response.data[0]
                 return {
-                    'trafficThreshold': config_data.get('trafficThreshold', 1000),
-                    'connectionRate': config_data.get('connectionRate', 100),
-                    'protocolBlacklist': config_data.get('protocolBlacklist', 'ICMP,IGMP')
+                    'traffic_threshold': config.get('traffic_threshold', 1000),
+                    'connection_rate': config.get('connection_rate', 100),
+                    'protocol_blacklist': config.get('protocol_blacklist', 'ICMP,IGMP')
                 }
             else:
                 default_config = {
-                    'trafficThreshold': 1000,
-                    'connectionRate': 100,
-                    'protocolBlacklist': 'ICMP,IGMP'
+                    'traffic_threshold': 1000,
+                    'connection_rate': 100,
+                    'protocol_blacklist': 'ICMP,IGMP',
+                    'user_id': self.user_id
                 }
-                doc_ref.set(default_config)
-                return default_config
+                self.client.table('network_configs').insert(default_config).execute()
+                return {
+                    'traffic_threshold': default_config['traffic_threshold'],
+                    'connection_rate': default_config['connection_rate'],
+                    'protocol_blacklist': default_config['protocol_blacklist']
+                }
         except Exception as e:
             print(f"Error loading baseline config: {e}")
             return {
-                'trafficThreshold': 1000,
-                'connectionRate': 100,
-                'protocolBlacklist': 'ICMP,IGMP'
+                'traffic_threshold': 1000,
+                'connection_rate': 100,
+                'protocol_blacklist': 'ICMP,IGMP'
             }
 
     def save_baseline_config(self, config):
         try:
-            doc_ref = self.db.collection(self.config_path).document('baseline')
-            doc_ref.set(config)
+            response = self.client.table('network_configs').select('id').eq('user_id', self.user_id).execute()
+
+            if response.data and len(response.data) > 0:
+                config_id = response.data[0]['id']
+                self.client.table('network_configs').update(config).eq('id', config_id).execute()
+            else:
+                config['user_id'] = self.user_id
+                self.client.table('network_configs').insert(config).execute()
+
             return True
         except Exception as e:
             print(f"Error saving baseline config: {e}")
@@ -79,32 +64,43 @@ class FirebaseService:
     def save_anomaly_alert(self, alert_data):
         try:
             alert_doc = {
-                'timestamp': firestore.SERVER_TIMESTAMP,
-                'type': alert_data.get('type', 'unknown'),
+                'alert_type': alert_data.get('type', 'unknown'),
                 'severity': alert_data.get('severity', 'medium'),
                 'source_ip': alert_data.get('source_ip', 'unknown'),
-                'details': alert_data.get('details', '')
+                'description': alert_data.get('details', ''),
+                'user_id': self.user_id,
+                'is_resolved': False
             }
 
-            self.db.collection(self.alerts_path).add(alert_doc)
+            self.client.table('network_alerts').insert(alert_doc).execute()
             return True
         except Exception as e:
             print(f"Error saving anomaly alert: {e}")
             return False
 
+    def save_metrics(self, metrics):
+        try:
+            metrics_doc = {
+                'total_packets': metrics.get('total_packets', 0),
+                'active_hosts': metrics.get('active_hosts', 0),
+                'connection_rate': metrics.get('connection_rate', 0),
+                'anomaly_count': metrics.get('anomaly_count', 0),
+                'user_id': self.user_id
+            }
+
+            self.client.table('network_metrics').insert(metrics_doc).execute()
+            return True
+        except Exception as e:
+            print(f"Error saving metrics: {e}")
+            return False
+
     def get_recent_alerts(self, limit=50):
         try:
-            alerts_ref = self.db.collection(self.alerts_path).order_by(
-                'timestamp', direction=firestore.Query.DESCENDING
-            ).limit(limit)
+            response = self.client.table('network_alerts').select('*').eq(
+                'user_id', self.user_id
+            ).order('timestamp', desc=True).limit(limit).execute()
 
-            alerts = []
-            for doc in alerts_ref.stream():
-                alert = doc.to_dict()
-                alert['id'] = doc.id
-                alerts.append(alert)
-
-            return alerts
+            return response.data if response.data else []
         except Exception as e:
             print(f"Error getting recent alerts: {e}")
             return []
